@@ -6,6 +6,7 @@
 
 主要是为了解决我们在服务器上下载GitHub等一些国外资源速度慢的问题。
 
+本项目用于CLI, 如果是在UI界面上，推荐使用 https://github.com/clash-verge-rev/clash-verge-rev
 <br>
 
 # 使用须知
