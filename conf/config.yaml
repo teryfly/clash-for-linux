@@ -1,0 +1,26 @@
+proxies:
+  - name: "surfercloud Shadowsocks"
+    type: ss
+    server: "43.132.224.225"
+    port: 8388
+    password: "xxxx"
+    cipher: "aes-256-gcm"
+
+proxy-groups:
+  - name: "Proxy"
+    type: select
+    proxies:
+      - "surfercloud Shadowsocks"
+      - "DIRECT"
+      - "REJECT"
+
+rules:
+  - DOMAIN-SUFFIX,google.com,Proxy
+  - DOMAIN-SUFFIX,poe.com,Proxy
+  - DOMAIN-SUFFIX,docker.io,Proxy
+  - DOMAIN-SUFFIX,github.com,Proxy
+  - DOMAIN-SUFFIX,chatgpt.com,Proxy
+  - DOMAIN-SUFFIX,youtube.com,Proxy
+  - DOMAIN-SUFFIX,googlevideo.com,Proxy  # 添加 googlevideo.com 以确保视频流量通过代理
+  - DOMAIN-SUFFIX,wireguard.com,Proxy
+  - MATCH,DIRECT
