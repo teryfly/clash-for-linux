@@ -66,6 +66,11 @@ bash install.sh
   clashctl add local   ➕ 从 runtime/subscriptions 导入本地订阅
   clashctl use         💱 切换订阅
   clashctl ls          📜 查看订阅列表
+⚡ 一键刷节点
+  ./proxy.sh start     🔄 拉订阅 + 过滤 + 延迟测试 + 切最快
+  ./proxy.sh stop      ⛔ 把 select 组切回 DIRECT
+  ./proxy.sh restart   🔁 stop + start
+  ./proxy.sh status    📊 当前选中 + 订阅缓存时间
 🔐 密钥管理
   clashctl secret      🔑 查看密钥
   clashctl secret 123  🔐 设置密钥
@@ -150,6 +155,86 @@ clashctl sub remove <名称>
 ```
 
 WSL / 普通用户如果无权写入 `/etc/environment`，`clashon` 会自动降级：运行时照常启动，当前 Shell 代理变量生效；系统代理持久接管和开机代理保持不可用。
+
+### ⚡ 一键刷新最优节点（`proxy.sh`）
+
+#### 解决的问题
+
+日常使用中，代理链路经常会遇到三类问题，单独处理都很繁琐：
+
+1. **节点失效**：机场更新后，原 config.yaml 里的节点 IP/端口/SNI 已下线，需要重新拉订阅、解码、合并 —— 手工做至少要 `curl + base64 -d + 编辑 yaml + PUT /configs` 四步。
+2. **国家/地区不适配**：很多 LLM 服务（如 Claude、Cursor、Anthropic）明确不支持香港、俄罗斯等节点，订阅自带的节点列表里混着这些，人工挑很容易漏。
+3. **延迟漂移**：同订阅下几十个节点里哪个当前最快，每次网络抖动后都要重新测；Web UI 里一个个点不现实。
+
+`proxy.sh` 把这三步串成一条命令：**拉订阅 → 解码 base64+share URI → 过滤屏蔽国家/地区 → 去重 → 热载 mihomo → 延迟测试所有候选 → 自动切到最快**。网络抽风时一条 `./proxy.sh restart` 就能收敛，不用再手工折腾配置。
+
+#### 用法
+
+```bash
+./proxy.sh start      # 拉最新订阅、过滤、延迟测试、切最快节点
+./proxy.sh stop       # 把 CLASH_SELECT_GROUP 切回 DIRECT（外国流量直连）
+./proxy.sh restart    # stop + start（一键刷新）
+./proxy.sh status     # 看当前选中节点 + 订阅缓存时间
+```
+
+`proxy.sh` 默认读取 `runtime/subscriptions.yaml` 里 `active` 那条订阅；要换订阅直接设环境变量：
+
+```bash
+CLASH_SUB_URL="https://example.com/sub?token=xxx" ./proxy.sh start
+```
+
+#### 可调参数
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `CLASH_SUB_URL` | 读 `subscriptions.yaml` active 源 | 覆盖订阅 URL |
+| `CLASH_BLOCKED_WORDS` | `香港 俄羅斯 俄罗斯 印度 巴基斯坦 孟加拉 土耳其 尼日利亞 尼日利亚 肯尼亚 巴西 阿根廷 越南 印尼 菲律賓 菲律宾` | 空格分隔的屏蔽词，节点名命中任一即剔除 |
+| `CLASH_PROBE_URL` | `https://www.google.com/generate_204` | 延迟探测 URL |
+| `CLASH_PROBE_TIMEOUT` | `5000` | 单次探测超时（ms） |
+| `CLASH_SELECT_GROUP` | `白嫖机场` | 切到哪个 `select` 策略组 |
+
+#### 行为说明
+
+- **订阅拉取**：先走 direct、再走本机 `127.0.0.1:7890` 代理、都失败就用上次成功时存的缓存（按 URL SHA-256 前缀命名，存在 `runtime/cache/subs/`），避免一次网络抖动把配置搞空。
+- **解码**：订阅返回 base64 包裹的 share URI（`hysteria2://` / `vless://` / `trojan://` / `vmess://`）或 clash YAML 都支持，自动识别。
+- **过滤**：按 `CLASH_BLOCKED_WORDS` 做子串匹配（大小写敏感，所以繁简体要各列一份）。
+- **去重**：按 `(server, port, name)` 三元组去重，订阅里常见的"剩余流量/距离重置/套餐到期"占位节点会被天然合并。
+- **合并**：替换 `runtime/config.yaml` 的 `proxies`，并把所有 `proxy-groups` 里对"已下线老节点"的引用清掉（防止 reload 报 `not found`），同时把新节点注入到 `CLASH_SELECT_GROUP` 的候选列表头部。
+- **热载**：走 mihomo `PUT /configs?path=…` API，不重启进程，不中断现有连接。
+- **延迟测试**：对 `CLASH_SELECT_GROUP` 下每个候选节点跑一次 `GET /proxies/{name}/delay`，剔除失败/超时，按延迟升序，选第一个切过去。所有候选都失败时会保留当前选中节点并返回非零退出码。
+
+#### 示例输出
+
+```
+$ ./proxy.sh start
+[23:13:34] 订阅: https://dy11.baipiaoyes.com/.../subscribe?token=a65e...
+[23:13:37]   订阅拉取成功（via direct，20548 字节）
+[23:13:37] 解码订阅（base64 + share URI → clash proxies）...
+  格式：share URI，解码得到 53 个节点
+[23:13:37] 过滤 + 合并节点...
+  订阅原始节点：53
+  过滤后保留 47 节点，屏蔽 6 节点（含香港/俄罗斯等）
+  去重后 47 节点
+  写入 /home/vz/Tery/clash-for-linux/runtime/config.patched.yaml
+[23:13:37] 热载配置...
+[23:13:37] 热载 OK
+[23:13:37] 延迟测试 (https://www.google.com/generate_204, 超时 5000ms)...
+      ✓ 🇺🇸美国HY5神速-推荐: 189ms
+      ✓ 🇺🇸美国HY4神速-1000M: 213ms
+      ✓ 🇺🇸美国HY3神速-小火箭无延迟也能用: 259ms
+      ...
+  WINNER:🇹🇼台湾家宽3-直连AI|89ms
+[23:15:09] 最快节点：🇹🇼台湾家宽3-直连AI
+[23:15:09] 已切换 白嫖机场 → 🇹🇼台湾家宽3-直连AI
+```
+
+#### 定时刷新（可选）
+
+加到 cron 即可每天自动刷节点（`crontab -e`）：
+
+```cron
+0 8 * * * /home/vz/Tery/clash-for-linux/proxy.sh start >> /tmp/proxy-cron.log 2>&1
+```
 
 ### 本地配置导入
 
